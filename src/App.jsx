@@ -482,7 +482,7 @@ export default function App() {
   const [isManual, setIsManual] = useState(false);
   const [position, setPosition] = useState(0.5); 
   const [steps, setSteps] = useState(40); 
-  const [editorMode, setEditorMode] = useState('free');
+  const [editorMode, setEditorMode] = useState('strength');
   const [copied, setCopied] = useState(false);
 
   const points = useMemo(() => {
