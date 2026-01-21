@@ -804,26 +804,124 @@ export default function App() {
   const { polyGradient, linearGradient, polyVal, linearVal, polyRgb, linearRgb } = useMemo(() => {
     if (points.length < 2 && !isRing) return { polyGradient:'', linearGradient: '', polyVal: null, linearVal: null };
     
-    const stops = [];
+    // --- Advanced Spline Math: Non-Uniform Catmull-Rom (Chordal) ---
     const n = points.length;
+    // For a ring, we have n segments (0->1, 1->2, ... n-1->0).
+    // For a line, we have n-1 segments.
     const segments = isRing ? n : n - 1;
+    
+    // 1. Calculate Chords (Distances) in NATIVE space
+    // This fixes the bug: we calculate distance based on the dimensions we are interpolating.
+    const chords = [];
+    for (let i = 0; i < segments; i++) {
+        const pA = points[i];
+        const pB = points[(i + 1) % n];
+        // Use getDelta to handle Hue wrapping automatically in OKLCH
+        let dist = vLen(getDelta(pB, pA, mathMode));
+        if (dist < 0.0001) dist = 0.0001; // Avoid divide by zero
+        chords.push(dist);
+    }
 
+    // 2. Compute Tangents (m)
+    // Non-Uniform Catmull-Rom Tangents adapted for Hermite Basis
+    const realTangents = new Array(n);
+    
+    for (let i = 0; i < n; i++) {
+        // Handle Open Ends
+        if (!isRing) {
+            if (i === 0) {
+                // Start: Linear projection to 2nd point
+                realTangents[i] = getDelta(points[1], points[0], mathMode);
+                continue;
+            } else if (i === n - 1) {
+                // End: Linear projection from 2nd to last point
+                realTangents[i] = getDelta(points[n-1], points[n-2], mathMode);
+                continue;
+            }
+        }
+
+        // Internal / Ring Points
+        const prevIdx = (i - 1 + n) % n;
+        const nextIdx = (i + 1) % n;
+        
+        const pPrev = points[prevIdx];
+        const pCurr = points[i];
+        const pNext = points[nextIdx];
+
+        // Indices for chords array
+        // Chord[k] is distance between P[k] and P[k+1]
+        // Incoming segment length: distance(prev, curr)
+        const dt0 = chords[(prevIdx) % segments]; 
+        // Outgoing segment length: distance(curr, next)
+        const dt1 = chords[i % segments];         
+
+        // Vectors between points (handling hue wrap)
+        const v1 = getDelta(pCurr, pPrev, mathMode); // P_i - P_i-1
+        const v2 = getDelta(pNext, pCurr, mathMode); // P_i+1 - P_i
+        
+        // Weighted Tangent Formula (Centripetal/Chordal)
+        // Scaled to match the Hermite interval [0,1] for the *outgoing* segment
+        // Multiplier derived from: T = (dt1^2 * v1 + dt0^2 * v2) / (dt0 * dt1 * (dt0 + dt1))
+        // To normalize for Hermite (velocity * duration), we multiply by dt1.
+        
+        const tangent = {
+            x: (dt1*dt1 * v1.x + dt0*dt0 * v2.x) / (dt0 * (dt0 + dt1)),
+            y: (dt1*dt1 * v1.y + dt0*dt0 * v2.y) / (dt0 * (dt0 + dt1)),
+            z: (dt1*dt1 * v1.z + dt0*dt0 * v2.z) / (dt0 * (dt0 + dt1)),
+            w: (dt1*dt1 * v1.w + dt0*dt0 * v2.w) / (dt0 * (dt0 + dt1))
+        };
+        
+        realTangents[i] = tangent;
+    }
+
+    // --- 3. Generate Spline Gradient Stops ---
+    const gradientStops = [];
+    
+    // Gradient Generation Loop
+    // We iterate from 0 to Steps.
     for (let i = 0; i <= steps; i++) {
         const globalT = i / steps;
         const scaled = globalT * segments;
+        
+        // Determine which segment we are in [0 ... segments-1]
         let segIdx = Math.floor(scaled);
         if (segIdx >= segments) segIdx = segments - 1; 
-        const localT = scaled - segIdx;
         
-        const idx0 = segIdx;
-        const idx1 = (segIdx + 1) % n;
+        const localT = scaled - segIdx; // 0..1 within segment
         
-        const p0 = points[idx0];
-        const m0 = effectiveTangents[idx0];
-        const p1 = points[idx1];
-        const m1 = effectiveTangents[idx1];
+        const pIdx0 = segIdx;
+        const pIdx1 = (segIdx + 1) % n;
         
-        const pt = hermite(p0, m0, p1, m1, localT, mathMode);
+        const p0 = points[pIdx0];
+        const p1 = points[pIdx1];
+        
+        let t0, t1;
+        
+        if (isManual) {
+            // Manual overrides from the editor handles
+            t0 = effectiveTangents[pIdx0];
+            t1 = effectiveTangents[pIdx1];
+        } else {
+            // Calculated Tangents
+            // Hermite requires:
+            // m0 = Tangent at Start * Duration
+            // m1 = Tangent at End * Duration
+            // Our realTangents[i] is already scaled for the segment *starting* at i.
+            
+            t0 = realTangents[pIdx0];
+            
+            // For the incoming tangent at P1, we have the tangent calculated for the NEXT segment.
+            // We must rescale it for the CURRENT segment length.
+            const t1Raw = realTangents[pIdx1];
+            const distCurr = chords[pIdx0]; // Length of this segment
+            const distNext = chords[pIdx1 % segments]; // Length of next segment
+            
+            // t1 = t1Raw * (distCurr / distNext)
+            const scaleFactor = (distNext > 0.0001) ? (distCurr / distNext) : 1;
+            t1 = vScale(t1Raw, scaleFactor);
+        }
+
+        const pt = hermite(p0, t0, p1, t1, localT, mathMode);
         
         let l, c, h;
         if (mathMode === 'oklch') {
@@ -833,10 +931,11 @@ export default function App() {
         }
         const alpha = pt.w ?? 1;
         
-        stops.push(`oklch(${l.toFixed(4)} ${c.toFixed(4)} ${h.toFixed(2)}deg / ${alpha.toFixed(3)}) ${(globalT * 100).toFixed(1)}%`);
+        gradientStops.push(`oklch(${l.toFixed(4)} ${c.toFixed(4)} ${h.toFixed(2)}deg / ${alpha.toFixed(3)}) ${(globalT * 100).toFixed(1)}%`);
     }
-    const polyGradient = `linear-gradient(to right, ${stops.join(', ')})`;
+    const polyGradient = `linear-gradient(to right, ${gradientStops.join(', ')})`;
 
+    // --- 4. Linear Reference ---
     const linStops = [];
     const listToMap = isRing ? [...colors, colors[0]] : colors;
     
@@ -847,6 +946,7 @@ export default function App() {
     });
     const linearGradient = `linear-gradient(to right, ${linStops.join(', ')})`;
 
+    // --- 5. Values at Position ---
     const scaledP = position * segments;
     let segP = Math.floor(scaledP); if (segP >= segments) segP = segments - 1;
     const uP = scaledP - segP;
@@ -854,7 +954,20 @@ export default function App() {
     const idx0 = segP;
     const idx1 = (segP + 1) % n;
 
-    const polyPt = hermite(points[idx0], effectiveTangents[idx0], points[idx1], effectiveTangents[idx1], uP, mathMode);
+    // Recalculate T for the single point (could refactor to shared func, but inline is safe)
+    let valT0, valT1;
+    if (isManual) {
+        valT0 = effectiveTangents[idx0];
+        valT1 = effectiveTangents[idx1];
+    } else {
+        valT0 = realTangents[idx0];
+        const distCurr = chords[idx0];
+        const distNext = chords[idx1 % segments];
+        const scaleFactor = (distNext > 0.0001) ? (distCurr / distNext) : 1;
+        valT1 = vScale(realTangents[idx1], scaleFactor);
+    }
+
+    const polyPt = hermite(points[idx0], valT0, points[idx1], valT1, uP, mathMode);
     
     let polyL, polyC, polyH;
     if (mathMode === 'oklch') {
@@ -865,6 +978,7 @@ export default function App() {
     const polyVal = { l: polyL, c: polyC, h: polyH, a: polyPt.w ?? 1 };
     const polyRgb = oklchToRgb(polyL, polyC, polyH);
 
+    // Linear Value
     const pA = points[idx0]; 
     const pB = points[idx1];
     let linPt;
@@ -898,7 +1012,7 @@ export default function App() {
     const linearRgb = oklchToRgb(linL, linC, linH);
 
     return { polyGradient, linearGradient, polyVal, linearVal, polyRgb, linearRgb };
-  }, [points, effectiveTangents, colors, position, steps, isRing, mathMode]);
+  }, [points, effectiveTangents, colors, position, steps, isRing, mathMode, isManual]);
 
   const copyToClipboard = () => {
     navigator.clipboard.writeText(polyGradient);
@@ -919,7 +1033,6 @@ export default function App() {
             </h1>
             <p className="text-sm text-gray-400">Generates smooth Catmull-Rom gradients.</p>
           </div>
-          {/* Fix 4: Flex nowrap to keep buttons aligned */}
           <div className="flex gap-2 items-center flex-wrap md:flex-nowrap">
             
             <div className="flex bg-gray-800 rounded p-1 gap-1">
@@ -965,19 +1078,32 @@ export default function App() {
                         </span>
                     </div>
                     
+                    {/* Visual Gradient Area */}
                     <div className="relative group select-none rounded-lg shadow-lg ring-1 ring-white/10 overflow-hidden">
+                        {/* Checkerboard for Alpha */}
                         <div className="absolute inset-0 bg-[url('data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIxNiIgaGVpZ2h0PSIxNiI+PHBhdGggZD0iTTAgMGg4djhIMHptOCA4aDh2OEg4eiIgZmlsbD0iIzIyMiIvPjwvc3ZnPg==')] z-0" />
+                        
                         <div className="h-16 w-full z-10 relative" style={{ background: polyGradient }} />
                         <div className="h-8 w-full z-10 relative border-t border-black/20" style={{ background: linearGradient }} />
                         
+                        {/* Indicator Line */}
                         <div className="absolute top-0 bottom-0 z-20 pointer-events-none flex flex-col items-center justify-center w-full" style={{ left: `${position * 100}%`, transform: 'translateX(-50%)' }}>
                             <div className="w-0.5 h-full bg-white shadow-[0_0_10px_rgba(0,0,0,0.5)]" />
                             <div className="absolute top-1/2 -translate-y-1/2 bg-white text-gray-950 text-[10px] font-bold px-1.5 py-0.5 rounded-full shadow-md whitespace-nowrap">{(position * 100).toFixed(1)}%</div>
                         </div>
 
+                        {/* Slider Input */}
                         <div className="absolute inset-0 z-30">
                              <Tooltip text="Scrub to compare values" side="top">
-                                <input type="range" min="0" max="1" step="0.001" value={position} onChange={(e) => setPosition(parseFloat(e.target.value))} className="absolute inset-0 w-full h-full opacity-0 cursor-ew-resize"/>
+                                <input 
+                                    type="range" 
+                                    min="0" 
+                                    max="1" 
+                                    step="0.001" 
+                                    value={position} 
+                                    onChange={(e) => setPosition(parseFloat(e.target.value))} 
+                                    className="absolute inset-0 w-full h-full opacity-0 cursor-ew-resize"
+                                />
                              </Tooltip>
                         </div>
                     </div>
@@ -1070,13 +1196,12 @@ export default function App() {
                         <Repeat size={14} /> Loop
                     </button>
                     <Tooltip text="Add a new color stop" side="left">
-                        <button onClick={() => { const newIdx = colors.length; setColors([...colors, [Math.random() * 360, 1, 1]]); setActivePointIndex(newIdx); setViewPointIndex(newIdx); }} className="bg-blue-600 hover:bg-blue-500 text-white p-2 rounded shadow-lg shadow-blue-900/20 transition-all active:scale-95">
+                        <button onClick={() => { const newIdx = colors.length; setColors([...colors, [Math.random() * 360, 1, 1, 1]]); setActivePointIndex(newIdx); setViewPointIndex(newIdx); }} className="bg-blue-600 hover:bg-blue-500 text-white p-2 rounded shadow-lg shadow-blue-900/20 transition-all active:scale-95">
                             <Plus size={18} />
                         </button>
                     </Tooltip>
                 </div>
             </div>
-            {/* Fix 1: 5 Columns for narrower cards -> squarer S/B box */}
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5 gap-4">
                 {colors.map((color, i) => (
                     <ColorPicker 
