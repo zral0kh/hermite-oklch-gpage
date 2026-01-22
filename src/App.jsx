@@ -295,30 +295,41 @@ function findSegmentBinary(u, t) {
 }
 
 // Main Fit Function
-function fitSpline(fixpoints, { space = 'oklab', method = 'natural-cubic', loop = false, strengths = 1, overrideTangents = [] } = {}) {
+function fitSpline(fixpoints, { space = 'oklab', method = 'natural-cubic', loop = false, strengths = 1, distribution = 'uniform', overrideTangents = [] } = {}) {
   const P = fixpoints.map((c) => parseColor(c, space));
   const n = P.length;
   if (n < 2) throw new Error('Need at least 2 points');
 
   const segments = loop ? n : n - 1;
-  const chords = []; 
   
-  // Calculate geometric chords based on method
-  if (method === 'natural-cubic') {
+  // Build chords based on distribution option
+  let chords = [];
+  
+  if (distribution === 'uniform') {
+    // Uniform spacing: all segments equal
     for (let i = 0; i < segments; i++) chords.push(1);
   } else {
-    const p = method === 'centripetal-CR' ? 0.5 : 1.0;
+    // Geometric spacing: based on spatial distance
     for (let i = 0; i < segments; i++) {
       const a = P[i];
       const b = P[(i + 1) % n];
       const d = getDelta(b, a, space);
-      let dist = Math.hypot(d[0] ?? 0, d[1] ?? 0, d[2] ?? 0); // 3D len excluding alpha
+      let dist = Math.hypot(d[0] ?? 0, d[1] ?? 0, d[2] ?? 0);
       if (dist < 1e-8) dist = 1e-8;
-      chords.push(method === 'chordal-CR' ? dist : Math.pow(dist, p));
+      
+      // Apply method-specific scaling
+      if (method === 'centripetal-CR') {
+        chords.push(Math.sqrt(dist));
+      } else if (method === 'chordal-CR') {
+        chords.push(dist);
+      } else {
+        // natural-cubic uses geometric distance as-is
+        chords.push(dist);
+      }
     }
   }
 
-  // Compute Tangents (Geometry)
+  // Compute Tangents
   let M;
   if (method === 'natural-cubic') {
     M = fitNaturalCubic(P, chords, loop, space);
@@ -336,7 +347,7 @@ function fitSpline(fixpoints, { space = 'oklab', method = 'natural-cubic', loop 
       }
   }
 
-  // Build Hermite Segments using UNIFORM time parameterization
+  // Build Hermite Segments
   const segs = [];
   for (let i = 0; i < segments; i++) {
     const p0 = P[i];
@@ -344,15 +355,14 @@ function fitSpline(fixpoints, { space = 'oklab', method = 'natural-cubic', loop 
     let m0 = M[i];
     let m1 = M[(i + 1) % n];
 
-    // Rescale Tangents to Uniform Time
+    // Convert tangents to Hermite form
     if (method === 'natural-cubic') {
-       // already chord=1
-    } else {
-       const dtCurrent = chords[i];
-       const dtNext = chords[(i + 1) % segments] || 1;
-       const scale = dtNext > 1e-9 ? (dtCurrent / dtNext) : 1;
-       m1 = vScale(m1, scale);
+      // Natural cubic returns derivatives; scale by chord length
+      const h = chords[i];
+      m0 = vScale(m0, h);
+      m1 = vScale(m1, h);
     }
+    // CR tangents are already in the correct units (no rescaling needed)
 
     let targetP1 = p1;
     if (space === 'oklch') {
@@ -379,11 +389,11 @@ function fitSpline(fixpoints, { space = 'oklab', method = 'natural-cubic', loop 
     segs.push({ a, b, c, d });
   }
 
-  // Calculate Cumulative U for Chordal Distribution
+  // Build cumulative U
   const u = [0];
   for (let i = 0; i < segments; i++) u.push(u[i] + chords[i]);
 
-  return { segs, u, totalLen: u[u.length - 1], n, loop, space, method, tangents: M };
+  return { segs, u, totalLen: u[u.length - 1], n, loop, space, method, distribution, tangents: M };
 }
 
 // Sampling Function
@@ -393,10 +403,10 @@ function splineColors(fixpoints, weights, {
     method = 'natural-cubic', 
     loop = false, 
     strengths = 1, 
-    distribution = 'equal', 
+    distribution = 'uniform', 
     overrideTangents = [] 
 } = {}) {
-  const spline = fitSpline(fixpoints, { space, method, loop, strengths, overrideTangents });
+  const spline = fitSpline(fixpoints, { space, method, loop, strengths, distribution, overrideTangents });
   const segments = loop ? spline.n : spline.n - 1;
 
   return weights.map(w => {
@@ -404,7 +414,7 @@ function splineColors(fixpoints, weights, {
     let segIndex = 0;
     let tLocal = 0;
 
-    if (distribution === 'equal') {
+    if (distribution === 'uniform') { 
       const scaled = ww * segments;
       segIndex = Math.floor(scaled);
       if (segIndex >= segments) segIndex = segments - 1;
@@ -1374,8 +1384,8 @@ export default function App() {
   const [copied, setCopied] = useState(false);
   const [isRing, setIsRing] = useState(false);
   const [mathMode, setMathMode] = useState('oklab'); 
-  const [splineMethod, setSplineMethod] = useState('chordal-CR');
-  const [distribution, setDistribution] = useState('equal'); 
+  const [splineMethod, setSplineMethod] = useState('natural-cubic');
+  const [distribution, setDistribution] = useState('uniform'); 
   const [tangentsState, setTangentsState] = useState([]); 
 
   const dragItem = useRef(null);
@@ -1663,14 +1673,14 @@ export default function App() {
 
              <div className="relative group z-50">
                 <div className="flex items-center gap-2 bg-gray-800 text-xs font-medium px-3 py-1.5 rounded text-gray-300 border border-gray-700">
-                    {distribution === 'equal' ? <AlignJustify size={14}/> : <AlignCenter size={14}/>}
+                    {distribution === 'uniform' ? <AlignJustify size={14}/> : <AlignCenter size={14}/>}
                     <select 
                         value={distribution} 
                         onChange={(e) => setDistribution(e.target.value)}
                         className="bg-gray-800 text-gray-200 appearance-none outline-none cursor-pointer pr-4"
                     >
-                        <option value="equal">Uniform</option>
-                        <option value="chordal">Chordal</option>
+                        <option value="uniform">Uniform</option>
+                        <option value="geometric">Geometric</option>
                     </select>
                 </div>
             </div>
