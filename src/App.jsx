@@ -1670,7 +1670,7 @@ export default function App() {
           <div>
             <h1 className="text-2xl font-bold text-white mb-1 tracking-tight flex items-center gap-2">
                <GitCommit className="text-blue-500" />
-               OKLCH Spline Gradient
+               {mathMode ==="oklab" ? "OKLAB" : "OKLCH"} Spline Gradient
             </h1>
             <p className="text-sm text-gray-400">Generates smooth interpolations using various spline methods.</p>
           </div>
