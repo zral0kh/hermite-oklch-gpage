@@ -1,5 +1,5 @@
 import React, { useState, useMemo, useEffect, useRef } from 'react';
-import { X, Plus, RotateCcw, MousePointer2, GitCommit, Copy, Check, Lock, Unlock, Monitor, FileCode, Braces, Layers, Repeat, Globe, Box, GripVertical, Settings2, AlignCenter, AlignJustify, Ruler, Compass } from 'lucide-react';
+import { X, Plus, RotateCcw, MousePointer2, GitCommit, Copy, Check, Lock, Unlock, Monitor, FileCode, Braces, Layers, Repeat, Globe, Box, GripVertical, Settings2, AlignCenter, AlignJustify, Ruler, Compass, ArrowLeftRight } from 'lucide-react';
 
 // ==========================================
 // 1. Math & Logic Library
@@ -683,7 +683,9 @@ function SplineEditor({
     
     // Basis computation index
     let basisIndex = viewIndex ?? 0;
-    if (!isRing) {
+    //if ring we have no end index, so we can use ends bc they properly defined via neighbors
+    // if rotation we use the tangent anyway so it does not matter
+    if (!isRing && mode !== 'rotation') {
         if (basisIndex === 0) basisIndex = 1;
         else if (basisIndex === points.length - 1) basisIndex = points.length - 2;
     }
@@ -720,13 +722,13 @@ function SplineEditor({
              tanVec = { x: t[1], y: t[2], z: t[0] };
          }
 
-         let u = norm(tanVec);
-         if (Math.hypot(u.x, u.y, u.z) < 1e-4) u = { x: 1, y: 0, z: 0 };
+         let n = norm(tanVec);
+         if (Math.hypot(n.x, n.y, n.z) < 1e-4) n = { x: 1, y: 0, z: 0 };
          
          let globalUp = { x: 0, y: 0, z: 1 };
-         if (Math.abs(u.z) > 0.99) globalUp = { x: 0, y: 1, z: 0 };
+         if (Math.abs(n.z) > 0.99) globalUp = { x: 0, y: 1, z: 0 };
          
-         const n = norm(cross(u, globalUp));
+         const u = norm(cross(n, globalUp));
          const v = norm(cross(n, u));
 
          return { center: centroid, u, v, n };
@@ -781,14 +783,14 @@ function SplineEditor({
   const offsetY = height/2;
 
   const toScreen = (pt) => {
-    const center = activeBasis.center;  // Changed
+    const center = activeBasis.center; 
     const cart = mathMode === 'oklch' ? oklchToOklab(pt) : pt;
     const rx = cart[1] - center.x; 
     const ry = cart[2] - center.y; 
     const rz = cart[0] - center.z; 
     
-    const x = rx * activeBasis.u.x + ry * activeBasis.u.y + rz * activeBasis.u.z;  // Changed
-    const y = rx * activeBasis.v.x + ry * activeBasis.v.y + rz * activeBasis.v.z;  // Changed
+    const x = rx * activeBasis.u.x + ry * activeBasis.u.y + rz * activeBasis.u.z;  
+    const y = rx * activeBasis.v.x + ry * activeBasis.v.y + rz * activeBasis.v.z; 
     return { x: x * scale + offsetX, y: offsetY - y * scale };
   };
 
@@ -906,9 +908,18 @@ function SplineEditor({
     setTangents(newTangents);
   };
 
+  const invertTangent = () => {
+        if (activeIndex === null || activeIndex === undefined) return;
+        const tan = tangents[activeIndex] || [0,0,0,0];
+        const newTangent = [ -tan[0], -tan[1], -tan[2], tan[3] ];
+        const newTangents = tangentsState.slice();
+        newTangents[activeIndex] = newTangent;
+        setTangents(newTangents);
+  }
+
   return (
     <div className="bg-gray-900 rounded-lg shadow-inner inline-block select-none relative overflow-hidden border border-gray-800 group/editor w-full h-full flex items-center justify-center">
-       <div className="absolute top-3 left-3 text-[10px] text-gray-500 pointer-events-none z-10 font-mono">
+       <div className="absolute top-2 left-3 text-[10px] text-gray-500 pointer-events-none z-10 font-mono">
          <div className="font-bold text-gray-300">{mathMode.toUpperCase()} SPACE</div>
          <div>Aligning to Stop #{ (viewIndex ?? 0) + 1 }</div>
        </div>
@@ -955,7 +966,7 @@ function SplineEditor({
                     onPointerDown={(e) => { e.stopPropagation(); setActiveIndex(i); setViewIndex && setViewIndex(i); }}
                     className="cursor-pointer"
                 />
-                <g className={mode === 'free' ? 'cursor-move' : 'cursor-pointer'} onPointerDown={(e) => handlePointerDown(e, i)}>
+                <g className={mode === 'free' ? 'cursor-move' : 'cursor-pointer'} onPointerDown={(e) => handlePointerDown(e, i)} opacity= {isActive ? 1 : 0.4}>
                     <circle cx={clampedHandle.x} cy={clampedHandle.y} r={12} fill="transparent" />
                     <circle cx={clampedHandle.x} cy={clampedHandle.y} r={5} fill={isDragging ? "#ffffff" : (mode === 'free' ? "#ef4444" : mode === 'rotation' ? "#10b981" : "#3b82f6")} stroke="black" strokeWidth={1}/>
                 </g>
@@ -964,19 +975,26 @@ function SplineEditor({
         })}
        </svg>
        
-      <div className="absolute top-3 right-3 z-20 flex flex-col gap-1 items-end">
-        <div className="flex gap-1 bg-gray-950 rounded border border-gray-800 p-0.5">
-          <Tooltip text={`Free Mode: Adjust length and direction`} side="bottom">
-              <button onClick={() => setMode('free')} className={`p-1.5 rounded ${mode === 'free' ? 'bg-blue-600 text-white' : 'text-gray-400 hover:text-gray-200'}`}><Unlock size={14} /></button>
-          </Tooltip>
-          <Tooltip text="Length Mode: Adjust tension only (drag along line)" side="bottom">
-              <button onClick={() => setMode('length')} className={`p-1.5 rounded ${mode === 'length' ? 'bg-blue-600 text-white' : 'text-gray-400 hover:text-gray-200'}`}><Ruler size={14} /></button>
-          </Tooltip>
-          <Tooltip text="Rotation Mode: Adjust angle only (preserve length)" side="bottom">
-            <button onClick={() => setMode('rotation')} className={`p-1.5 rounded ${mode === 'rotation' ? 'bg-green-600 text-white' : 'text-gray-400 hover:text-gray-200'}`}>
-                <Compass size={14} />
-            </button>
-          </Tooltip>
+      <div className="absolute top-2 right-2 z-20 flex flex-col gap-1 items-end">
+        <div className="flex gap-1">
+            <div className=" bg-gray-950 rounded border border-gray-800 p-0.5">
+                <Tooltip className="px-1" text={`Invert Tangent: Inverts Tangent Direction`} side="bottom">
+                    <button onClick={() => invertTangent()} className={'p-1.5 rounded text-gray-400 hover:text-gray-200 active:text-white active:bg-purple-400'}><ArrowLeftRight size={14} /></button>
+                </Tooltip>
+            </div>
+            <div className="flex gap-1 bg-gray-950 rounded border border-gray-800 p-0.5">
+                <Tooltip text={`Free Mode: Adjust length and direction`} side="bottom">
+                    <button onClick={() => setMode('free')} className={`p-1.5 rounded ${mode === 'free' ? 'bg-red-600 text-white' : 'text-gray-400 hover:text-gray-200'}`}><Unlock size={14} /></button>
+                </Tooltip>
+                <Tooltip text="Length Mode: Adjust tension only (drag along line)" side="bottom">
+                    <button onClick={() => setMode('length')} className={`p-1.5 rounded ${mode === 'length' ? 'bg-blue-600 text-white' : 'text-gray-400 hover:text-gray-200'}`}><Ruler size={14} /></button>
+                </Tooltip>
+                <Tooltip text="Rotation Mode: Adjust angle only (preserve length)" side="bottom">
+                    <button onClick={() => setMode('rotation')} className={`p-1.5 rounded ${mode === 'rotation' ? 'bg-green-600 text-white' : 'text-gray-400 hover:text-gray-200'}`}>
+                        <Compass size={14} />
+                    </button>
+                </Tooltip>
+            </div>
         </div>
         {hasEdits && (
               <div className="bg-gray-950 rounded border border-gray-800 p-0.5">
@@ -1210,7 +1228,7 @@ function AlphaEditor({
 
     return (
         <div className="bg-gray-900 rounded-lg shadow-inner relative overflow-hidden border border-gray-800 w-full h-full flex items-center justify-center group/alpha">
-            <div className="absolute top-3 left-3 text-[10px] text-gray-500 font-mono font-bold pointer-events-none z-10">
+            <div className="absolute top-2 left-3 text-[10px] text-gray-500 font-mono font-bold pointer-events-none z-10">
                 ALPHA CURVE
             </div>
              <div className="absolute top-3 right-3 z-20 flex bg-gray-950 rounded border border-gray-800 p-0.5">
